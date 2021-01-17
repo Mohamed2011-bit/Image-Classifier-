@@ -1,44 +1,144 @@
-import matplotlib.pyplot as plt
-import torch.nn.functional as F
-import torchvision.models as models
-import numpy as np
-import iutils
-import argparse
-import time
 import torch
-from torch import nn
-from torch import tensor
-from torch import optim
-from torch.autograd import Variable
-from torchvision import datasets, transforms
+from torchvision import transforms, datasets
+import argparse
+from iutils import *
 
-arg_parse = argparse.ArgumentParser(description='Train.py')
+def load_and_transform_data(train_dir, valid_dir):
+    # Define transforms for the training, validation, and testing sets
+    train_transforms = transforms.Compose([
+        transforms.RandomRotation(30),
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],
+                             [0.229, 0.224, 0.225])
+    ])
 
-arg_parse.add_argument('data_dir', action="store", default="./flowers/")
-arg_parse.add_argument('--gpu', dest="gpu", action="store", default="gpu")
-arg_parse.add_argument('--save_dir', dest="save_dir", action="store", default="./checkpoint.pth")
-arg_parse.add_argument('--learning_rate', dest="learning_rate", action="store", default=0.01)
-arg_parse.add_argument('--dropout', dest = "dropout", action = "store", default = 0.5)
-arg_parse.add_argument('--epochs', dest="epochs", action="store", type=int, default=20)
-arg_parse.add_argument('--arch', dest="arch", action="store", default="vgg13", type = str)
-arg_parse.add_argument('--hidden_units', type=int, dest="hidden_units", action="store", default=512)
+    valid_transforms = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],
+                             [0.229, 0.224, 0.225])
+    ])
 
-parse_args = ap.parse_args()
-root = parse_args.data_dir
-path = parse_args.save_dir
-learning_rate = parse_args.learning_rate
-structure = parse_args.arch
-dropout = parse_args.dropout
-hidden_layer1 = parse_args.hidden_units
-device = parse_args.gpu
-epochs = parse_args.epochs
+    # Load the datasets with ImageFolder
+    train_dataset = datasets.ImageFolder(train_dir, transform=train_transforms)
+    valid_dataset = datasets.ImageFolder(valid_dir, transform=valid_transforms)
 
-def main():
-    trainloader, v_loader, testloader = iutils.load_data(root)
-    model, optimizer, criterion = iutils.network_construct(structure,dropout,hidden_layer1,learning_rate,device)
-    iutils.do_deep_learning(model, optimizer, criterion, epochs, 40, trainloader, device)
-    iutils.save_checkpoint(model,path,structure,hidden_layer1,dropout,learning_rate)
-    print("Successfull Training!")
+    # Using the image datasets and the trainforms, define the dataloaders
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
+    valid_dataloader = torch.utils.data.DataLoader(valid_dataset, batch_size=64)
 
-if __name__== "__main__":
-    main()
+    return train_dataloader, valid_dataloader, train_dataset.class_to_idx
+
+def validation(model, dataloader, criterion, device):
+    model.to(device)
+
+    valid_loss = 0
+    accuracy = 0
+    for i, (inputs, labels) in enumerate(valid_dataloader):
+        inputs, labels = inputs.to(device), labels.to(device)
+        
+        output = model.forward(inputs)
+        valid_loss += criterion(output, labels).item()
+
+        ps = torch.exp(output)
+        equality = (labels.data == ps.max(dim=1)[1])
+        accuracy += equality.type(torch.FloatTensor).mean()
+    
+    return valid_loss, accuracy
+
+def train_classifier(epochs, print_every, model, train_data, valid_data, optimizer, criterion, device):
+    model.to(device)
+    moves = 0
+    
+    for e in range(epochs):
+        losses = 0
+        model.train()
+        for i, (images, labels) in enumerate(train_data):
+            moves += 1
+            images, labels = images.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+
+            outputs = model.forward(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            losses += loss.item()
+
+            if moves % print_every == 0:
+                model.eval()
+
+                with torch.no_grad():
+                    valid_loss, accuracy = validate(model, valid_data, criterion, device)
+
+                print("Epoch: {}/{}.. ".format(e+1, epochs),
+                      "Training Loss: {:.3f}.. ".format(loss_so_far/print_every),
+                      "Validation Loss: {:.3f}.. ".format(valid_loss/len(valid_dataloader)),
+                      "Validation Accuracy: {:.3f}".format(accuracy/len(valid_dataloader)))
+
+                loss_so_far = 0
+
+                model.train()
+
+                
+def save_checkpoint(arch, save_dir, input_size, output_size, hidden_units, dropout):
+    checkpoint = {'arch': arch,
+                  'input_size': input_size,
+                  'output_size': output_size,
+                  'hidden_units': hidden_units,
+                  'dropout': dropout,
+                  'state_dict': model.classifier.state_dict()}
+
+    torch.save(checkpoint, save_dir + '/checkpoint.pth')
+    
+def main(data_dir, save_dir, arch, learning_rate, hidden_units, epochs, gpu):
+    device = torch.device("cuda:0" if (torch.cuda.is_available() and gpu) else "cpu")  
+    
+    # Define location of image data
+    train_dir = data_dir + '/train'
+    valid_dir = data_dir + '/valid'
+    
+    # Define defaults
+    input_size = 25088
+    output_size = 102
+    dropout = 0
+    
+    print_every = 40   
+    
+    train_dataloader, valid_dataloader, class_to_idx = load_and_transform_data(train_dir, valid_dir)
+    
+    model = model_creation(arch)
+    if not model:
+        print("Architecture not supported.")
+        return
+    
+    model.class_to_idx = class_to_idx
+    
+    model.classifier = classifier_builder(size_input, size_hidden, size_output, dropout)
+
+    criterion = torch.nn.NLLLoss()
+    optimizer = torch.optim.Adam(model.classifier.parameters(), lr=learning_rate)
+
+    train_classifier(epochs, print_every, model, train_data, valid_data, optimizer, criterion, device)
+    save_checkpoint(model, save_dir, input_size, output_size, hidden_units, dropout)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='Train an image classifier using pretrained architecture.',
+    )
+    
+    parser.add_argument('data_directory', default='flowers')
+    parser.add_argument('--save_dir', default='.')
+    parser.add_argument('--arch', default='vgg16')
+    parser.add_argument('--learning_rate', default=0.01, type=float)
+    parser.add_argument('--hidden_units', default=[])
+    parser.add_argument('--epochs', default=8, type=int)
+    parser.add_argument('--gpu', action='store_true', default=True)
+    input_args = parser.parse_args()
+
+    main(input_args.data_directory, input_args.save_dir, input_args.arch,
+         input_args.learning_rate, input_args.hidden_units, input_args.epochs, input_args.gpu)
